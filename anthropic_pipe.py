@@ -38,9 +38,13 @@ Supports:
 
 Changelog:
 v0.8.12
+<<<<<<< main
+- Added ANTHROPIC_BASE_URL valve to allow routing all API requests through a custom proxy URL
+=======
 - Fixed Tool Result output Grouping
 - Decluddered the if/else horror in event_type handling
 - Fixed OpenTerminal Tools
+>>>>>>> main
 
 v0.8.11
 - Added Caching time CACHE_TTL valve to choose between 5 minutes (default) and 1 hour
@@ -579,7 +583,12 @@ class PipeRequestContext:
 
 class Pipe:
     API_VERSION = "2023-06-01"  # Current API version as of May 2025
-    MODEL_URL = "https://api.anthropic.com/v1/messages"
+    _DEFAULT_API_BASE = "https://api.anthropic.com"
+
+    @property
+    def MODEL_URL(self):
+        base = self.valves.ANTHROPIC_BASE_URL.strip().rstrip("/") if hasattr(self, "valves") and self.valves.ANTHROPIC_BASE_URL.strip() else self._DEFAULT_API_BASE
+        return f"{base}/v1/messages"
 
     # Capability overrides for fields NOT available from the /v1/models API.
     # The API now provides: max_tokens, max_input_tokens, capabilities (thinking, effort, vision, etc.)
@@ -677,6 +686,10 @@ class Pipe:
 
     class Valves(BaseModel):
         ANTHROPIC_API_KEY: str = "Your API Key Here"
+        ANTHROPIC_BASE_URL: str = Field(
+            default="",
+            description="Custom base URL for the Anthropic API (e.g. for a proxy). Leave empty to use the default Anthropic endpoint (https://api.anthropic.com).",
+        )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
             description="Enable Fast Mode for Opus 4.6. Up to 2.5x faster output at higher costs",
@@ -916,7 +929,8 @@ class Pipe:
         new_cache: Dict[str, dict] = {}
         try:
             api_key = self.valves.ANTHROPIC_API_KEY
-            client = AsyncAnthropic(api_key=api_key)
+            base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
+            client = AsyncAnthropic(api_key=api_key, **({"base_url": base_url} if base_url else {}))
             async for m in client.models.list():
                 name = m.id
                 display_name = getattr(m, "display_name", name)
@@ -1388,7 +1402,8 @@ class Pipe:
             import hashlib
             import uuid
 
-            client = AsyncAnthropic(api_key=api_key)
+            base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
+            client = AsyncAnthropic(api_key=api_key, **({"base_url": base_url} if base_url else {}))
 
             # Get file metadata first
             file_meta = await client.beta.files.retrieve_metadata(file_id=file_id)
@@ -1466,7 +1481,8 @@ class Pipe:
         client = None
         try:
             from anthropic import AsyncAnthropic
-            client = AsyncAnthropic(api_key=self.valves.ANTHROPIC_API_KEY)
+            base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
+            client = AsyncAnthropic(api_key=self.valves.ANTHROPIC_API_KEY, **({"base_url": base_url} if base_url else {}))
         except ImportError:
             logger.warning("Anthropic SDK not available for file upload")
             return blocks_by_user_msg, processed_filenames
@@ -3218,7 +3234,8 @@ class Pipe:
                 api_key = user_api_key.strip()
                 logger.debug("Using user-provided API key from UserValves")
             request_timeout = self.valves.REQUEST_TIMEOUT
-            client = AsyncAnthropic(api_key=api_key, default_headers=headers, timeout=request_timeout)
+            base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
+            client = AsyncAnthropic(api_key=api_key, default_headers=headers, timeout=request_timeout, **({"base_url": base_url} if base_url else {}))
             payload_for_stream = {k: v for k, v in payload.items() if k != "stream"}
             include_usage = body.get("stream_options", {}).get("include_usage", False)
             if include_usage:
@@ -5195,7 +5212,8 @@ class Pipe:
             # Make synchronous request to Anthropic API
             # For task requests, we don't have __user__ context, so use default key
             api_key = self.valves.ANTHROPIC_API_KEY
-            client = AsyncAnthropic(api_key=api_key)
+            base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
+            client = AsyncAnthropic(api_key=api_key, **({"base_url": base_url} if base_url else {}))
 
             response = await client.messages.create(**task_payload)
 
@@ -6131,7 +6149,8 @@ class Pipe:
             try:
                 from anthropic import AsyncAnthropic
 
-                client = AsyncAnthropic(api_key=api_key)
+                base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
+                client = AsyncAnthropic(api_key=api_key, **({"base_url": base_url} if base_url else {}))
 
                 # Fetch all available skills
                 available_skills = {}

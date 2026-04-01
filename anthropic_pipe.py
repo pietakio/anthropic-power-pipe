@@ -852,6 +852,10 @@ class Pipe:
             default=False,
             description="Show Context Window Progress",
         )
+        SHOW_CACHE_INFO: bool = Field(
+            default=False,
+            description="Show cache status (write/read tokens) after each response. Immediately reveals when RAG, memory, or tool changes invalidate the cache.",
+        )
         WEB_SEARCH_MAX_USES: int = Field(
             default=5,
             ge=1,
@@ -3237,7 +3241,11 @@ class Pipe:
             base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
             client = AsyncAnthropic(api_key=api_key, default_headers=headers, timeout=request_timeout, **({"base_url": base_url} if base_url else {}))
             payload_for_stream = {k: v for k, v in payload.items() if k != "stream"}
-            include_usage = body.get("stream_options", {}).get("include_usage", False)
+            include_usage = (
+                __user__["valves"].SHOW_TOKEN_COUNT or
+                __user__["valves"].SHOW_CACHE_INFO or
+                body.get("stream_options", {}).get("include_usage", False)
+            )
             if include_usage:
                 total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
                 if self.valves.CACHE_CONTROL != "cache disabled":
@@ -5121,21 +5129,7 @@ class Pipe:
 
         final_status = "✅ Response Complete"
         # ============ Token Count Display ============
-        if include_usage and __user__["valves"].SHOW_TOKEN_COUNT and total_usage:
-            # Use total_tokens from total_usage which now represents the last turn (Context Size)
-            total_tokens = total_usage.get("total_tokens", 0)
-
-            # Determine context window based on model capability and valve setting
-            model_info = self.get_model_info(body["model"].split("/")[-1])
-            is_1m = model_info.get("supports_1m_context", False)
-            context_window = 1_000_000 if is_1m else 200_000
-            context_label = "1M" if is_1m else "200k"
-            percentage = min((total_tokens / context_window) * 100, 100)
-
-            # Progress bar (10 segments)
-            filled = int(percentage / 10)
-            bar = "█" * filled + "░" * (10 - filled)
-
+        if include_usage and total_usage:
             def format_num(n: int) -> str:
                 if n >= 1_000_000:
                     return f"{n/1_000_000:.1f}M"
@@ -5143,9 +5137,38 @@ class Pipe:
                     return f"{n/1_000:.1f}K"
                 return str(n)
 
-            final_status += (
-                f" [{bar}] {format_num(total_tokens)}/{context_label} ({percentage:.1f}%)"
-            )
+            # Context window progress bar
+            if __user__["valves"].SHOW_TOKEN_COUNT:
+                # Use total_tokens from total_usage which now represents the last turn (Context Size)
+                total_tokens = total_usage.get("total_tokens", 0)
+
+                # Determine context window based on model capability and valve setting
+                model_info = self.get_model_info(body["model"].split("/")[-1])
+                is_1m = model_info.get("supports_1m_context", False)
+                context_window = 1_000_000 if is_1m else 200_000
+                context_label = "1M" if is_1m else "200k"
+                percentage = min((total_tokens / context_window) * 100, 100)
+
+                # Progress bar (10 segments)
+                filled = int(percentage / 10)
+                bar = "█" * filled + "░" * (10 - filled)
+
+                final_status += (
+                    f" [{bar}] {format_num(total_tokens)}/{context_label} ({percentage:.1f}%)"
+                )
+
+            # Cache status display
+            if (
+                __user__["valves"].SHOW_CACHE_INFO and
+                self.valves.CACHE_CONTROL != "cache disabled"
+            ):
+                ttl_label = "1hr" if self.valves.CACHE_TTL == "1 hour" else "5min"
+                cache_write = total_usage.get("cache_creation_input_tokens", 0)
+                cache_read = total_usage.get("cache_read_input_tokens", 0)
+                final_status += (
+                    f" | Cache write ({ttl_label}): {format_num(cache_write)}"
+                    f" | Cache read: {format_num(cache_read)}"
+                )
 
         # Consolidate: emit a final replace with the complete message so OpenWebUI
         # has the authoritative content (replaces any partial delta/replace state).

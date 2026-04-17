@@ -123,10 +123,22 @@ PATTERN_EMPTY_ATTACHED = re.compile(
     r"<attached_files>\s*</attached_files>\s*", re.DOTALL
 )
 
-# Pattern to strip OpenWebUI <details type="tool_calls"> blocks from conversation history.
-# These are UI-rendering artifacts that cause Claude 4.6 models to pattern-match and
-# generate fake tool call HTML instead of making actual API tool_use calls.
-PATTERN_TOOL_CALLS_DETAILS = re.compile(
+# Pattern to PARSE OpenWebUI <details type="tool_calls"> blocks from conversation history.
+# Captures id, name, arguments, and result attributes for reconstruction as proper API blocks.
+# These must be converted back to tool_use/tool_result structures for Claude to see its history.
+PATTERN_TOOL_CALLS_PARSE = re.compile(
+    r'<details\s+type="tool_calls"[^>]*'
+    r'\s+id="([^"]*)"'          # Group 1: tool use ID
+    r'[^>]*\s+name="([^"]*)"'   # Group 2: tool name
+    r'[^>]*\s+arguments="([^"]*)"'  # Group 3: arguments (HTML-escaped JSON)
+    r'(?:[^>]*\s+result="([^"]*)")?'  # Group 4: result (optional, HTML-escaped)
+    r'[^>]*>.*?</details>',
+    flags=re.DOTALL,
+)
+
+# Fallback pattern to strip any tool_calls blocks that don't match the parse pattern
+# (e.g., in-progress tool calls without results)
+PATTERN_TOOL_CALLS_STRIP = re.compile(
     r'\n?<details type="tool_calls"[^>]*>.*?</details>\n?',
     flags=re.DOTALL,
 )
@@ -134,6 +146,14 @@ PATTERN_TOOL_CALLS_DETAILS = re.compile(
 # Pattern to strip OpenWebUI <details type="code_interpreter"> blocks from conversation history.
 PATTERN_CODE_INTERPRETER_DETAILS = re.compile(
     r'\n?<details type="code_interpreter"[^>]*>.*?</details>\n?',
+    flags=re.DOTALL,
+)
+
+# Pattern to strip OpenWebUI <details type="reasoning"> blocks from conversation history.
+# Thinking blocks from prior turns are auto-filtered by the API, and we can't reconstruct
+# them without the signature. Strip them to avoid wasting tokens on unusable HTML text.
+PATTERN_REASONING_DETAILS = re.compile(
+    r'\n?<details type="reasoning"[^>]*>.*?</details>\n?',
     flags=re.DOTALL,
 )
 
@@ -1870,6 +1890,76 @@ class Pipe:
             role = msg.get("role")
             raw_content = msg.get("content")
 
+            # Check if this is an assistant message with tool call history in HTML
+            # This needs to be handled specially to reconstruct proper API message sequence
+            if (
+                role == "assistant"
+                and isinstance(raw_content, str)
+                and '<details type="tool_calls"' in raw_content
+            ):
+                # Parse tool history from HTML
+                tool_use_blocks, tool_result_blocks, text_before, text_after = (
+                    self._parse_tool_history_from_html(raw_content)
+                )
+
+                if tool_use_blocks:
+                    # Reconstruct proper message sequence for tool history
+                    logger.debug(
+                        f"🔧 Reconstructing tool history: {len(tool_use_blocks)} tool_use, "
+                        f"{len(tool_result_blocks)} tool_result blocks"
+                    )
+
+                    # 1. Assistant message with text before + tool_use blocks
+                    assistant_content = []
+                    if text_before:
+                        # Clean the text (strip reasoning/code_interpreter blocks)
+                        cleaned_before = PATTERN_REASONING_DETAILS.sub("", text_before)
+                        cleaned_before = PATTERN_CODE_INTERPRETER_DETAILS.sub(
+                            "", cleaned_before
+                        ).strip()
+                        if cleaned_before:
+                            assistant_content.append(
+                                {"type": "text", "text": cleaned_before}
+                            )
+                    assistant_content.extend(tool_use_blocks)
+
+                    if assistant_content:
+                        wrapped_msg = {"role": "assistant", "content": assistant_content}
+                        extracted_metadata = self._extract_metadata_marker_from_message(
+                            wrapped_msg
+                        )
+                        if extracted_metadata:
+                            previous_marker_metadata.extend(extracted_metadata)
+                        processed_messages.append(wrapped_msg)
+
+                    # 2. User message with tool_result blocks
+                    if tool_result_blocks:
+                        processed_messages.append(
+                            {"role": "user", "content": tool_result_blocks}
+                        )
+
+                    # 3. If there's text after, create another assistant message
+                    if text_after:
+                        # Clean the text
+                        cleaned_after = PATTERN_REASONING_DETAILS.sub("", text_after)
+                        cleaned_after = PATTERN_CODE_INTERPRETER_DETAILS.sub(
+                            "", cleaned_after
+                        ).strip()
+                        if cleaned_after:
+                            wrapped_msg = {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": cleaned_after}],
+                            }
+                            extracted_metadata = (
+                                self._extract_metadata_marker_from_message(wrapped_msg)
+                            )
+                            if extracted_metadata:
+                                previous_marker_metadata.extend(extracted_metadata)
+                            processed_messages.append(wrapped_msg)
+
+                    continue  # Skip normal processing - we've handled this message
+
+            # Normal processing for messages without tool history HTML
             claude_message = self._convert_content_to_claude_format(raw_content, role=role)
             if not claude_message:
                 continue
@@ -2208,6 +2298,78 @@ class Pipe:
 
         return claude_tools, api_tool_names
 
+    def _parse_tool_history_from_html(
+        self, text: str
+    ) -> tuple[list[dict], list[dict], str, str]:
+        """
+        Parse tool call HTML blocks from assistant message text and reconstruct
+        proper Anthropic API structures.
+
+        Returns:
+            tuple of (tool_use_blocks, tool_result_blocks, text_before, text_after)
+            - tool_use_blocks: List of {"type": "tool_use", "id": ..., "name": ..., "input": ...}
+            - tool_result_blocks: List of {"type": "tool_result", "tool_use_id": ..., "content": ...}
+            - text_before: Text before the first tool_call block
+            - text_after: Text after the last tool_call block
+        """
+        tool_use_blocks = []
+        tool_result_blocks = []
+
+        # Find all tool_calls blocks with their positions
+        matches = list(PATTERN_TOOL_CALLS_PARSE.finditer(text))
+
+        if not matches:
+            # No tool calls found - return empty lists and full text as "after"
+            # (will be cleaned up by _convert_content_to_claude_format)
+            return [], [], "", text
+
+        # Track positions for text splitting
+        first_match_start = matches[0].start()
+        last_match_end = matches[-1].end()
+
+        # Extract text before first tool and after last tool
+        text_before = text[:first_match_start].strip()
+        text_after = text[last_match_end:].strip()
+
+        # Parse each tool_calls block
+        for match in matches:
+            tool_id = match.group(1)
+            tool_name = match.group(2)
+            arguments_escaped = match.group(3)
+            result_escaped = match.group(4)  # May be None if no result
+
+            # Unescape HTML entities in arguments
+            arguments_str = html.unescape(arguments_escaped) if arguments_escaped else ""
+
+            # Parse arguments JSON
+            try:
+                if arguments_str.strip():
+                    tool_input = json.loads(arguments_str)
+                else:
+                    tool_input = {}
+            except json.JSONDecodeError:
+                logger.debug(f"Failed to parse tool arguments JSON: {arguments_str[:100]}")
+                tool_input = {}
+
+            # Create tool_use block
+            tool_use_blocks.append({
+                "type": "tool_use",
+                "id": tool_id,
+                "name": tool_name,
+                "input": tool_input,
+            })
+
+            # Create tool_result block if we have a result
+            if result_escaped is not None:
+                result_content = html.unescape(result_escaped)
+                tool_result_blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": result_content,
+                })
+
+        return tool_use_blocks, tool_result_blocks, text_before, text_after
+
     def _convert_content_to_claude_format(
         self, content: Union[str, List[dict], None], role: str = "user"
     ) -> List[dict]:
@@ -2221,22 +2383,19 @@ class Pipe:
             return []
 
         if isinstance(content, str):
-            # NOTE: Do NOT remove thinking blocks from assistant messages!
-            # Per Anthropic docs: thinking blocks MUST be preserved unmodified during tool use loops.
-            # The entire sequence of consecutive thinking blocks must match the original model output.
-            # For multi-turn: prior turn thinking CAN be omitted (API auto-filters), but preserving is preferred.
-            # With interleaved thinking (Claude 4), thinking blocks can appear BETWEEN tool calls too.
-            # Thinking blocks come back as serialized text (with <details type="reasoning">...) from OpenWebUI,
-            # and the API requires them to remain unchanged.
-
             # Strip OpenWebUI UI-rendering artifacts from conversation history.
-            # <details type="tool_calls"> and <details type="code_interpreter"> are display-only
-            # HTML that OpenWebUI stores in message content. If sent to Claude 4.6 models,
-            # they pattern-match these and generate fake tool call HTML as text output
-            # instead of making actual API tool_use calls.
+            # NOTE: tool_calls blocks are parsed and reconstructed in _convert_messages_to_claude_format
+            # before this method is called. Here we just clean up any remaining UI artifacts.
             if role == "assistant":
-                content = PATTERN_TOOL_CALLS_DETAILS.sub("", content)
+                # Strip any remaining tool_calls blocks (e.g., malformed or in-progress ones)
+                content = PATTERN_TOOL_CALLS_STRIP.sub("", content)
+                # Strip code_interpreter blocks (display-only UI artifact)
                 content = PATTERN_CODE_INTERPRETER_DETAILS.sub("", content)
+                # Strip thinking/reasoning blocks from prior turns.
+                # We can't reconstruct them as proper API thinking blocks (missing signature),
+                # and the API auto-filters prior turn thinking anyway. Keeping them as HTML text
+                # just wastes tokens on unusable content.
+                content = PATTERN_REASONING_DETAILS.sub("", content)
 
             # Only return non-empty text blocks
             if content.strip():

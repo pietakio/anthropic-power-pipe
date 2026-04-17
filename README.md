@@ -38,8 +38,6 @@ multi-task workflows for your use case, including:
 | 📊 **1M Token Context** | Extended context for Opus 4.6, Sonnet 4/4.5 |
 | 🎨 **Agent Skills** | pptx, xlsx, docx, pdf & custom skills via Files API |
 
----
-
 ## ✨ Features
 
 ### Core
@@ -80,8 +78,6 @@ multi-task workflows for your use case, including:
 | **Effort Parameter** | low / medium / high / max (GA) |
 | **Prompt Caching** | 4-level cache: tools, system prompt, messages; RAG/Memory aware |
 
----
-
 ## 📦 Installation
 
 <!-- FIXME: Uncomment after posting to openwebui.com, please. *sigh*
@@ -98,7 +94,7 @@ multi-task workflows for your use case, including:
 
 1. On GitHub:
    1. Browse to the [raw source code for Anthropic Power
-      Pipe](anthropic_power_pipe.py?raw=1).
+      Pipe](https://raw.githubusercontent.com/pietakio/anthropic-power-pipe/refs/heads/main/anthropic_power_pipe.py).
    1. Copy the contents to your system clipboard (e.g., `<Ctrl-a> <Ctrl-c>`).
 1. In OpenWeb UI:
    1. **Admin Settings** → **Functions** → **"+ New Function"**

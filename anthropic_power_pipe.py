@@ -294,6 +294,19 @@ class Pipe:
             "supports_1m_context": True,
             "supports_dynamic_filtering": True,
         },
+        # Opus 4.7 breaking changes:
+        # - No budget_tokens (adaptive thinking only)
+        # - No sampling params (temperature/top_p/top_k)
+        # - Thinking content omitted by default (need display: "summarized")
+        # - New xhigh effort level
+        "claude-opus-4-7": {
+            "supports_1m_context": True,
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "requires_adaptive_only": True,  # No budget_tokens, adaptive thinking only
+            "supports_effort_xhigh": True,   # New xhigh effort level
+            "no_sampling_params": True,      # temperature/top_p/top_k return 400 error
+        },
     }
 
     # Cached model capabilities from API (populated by get_anthropic_models)
@@ -339,6 +352,10 @@ class Pipe:
             "supports_1m_context": False,
             "supports_dynamic_filtering": False,
             "supports_fast_mode": False,
+            # Opus 4.7+ specific flags (defaults for older models)
+            "requires_adaptive_only": False,  # True = no budget_tokens allowed
+            "supports_effort_xhigh": False,   # True = xhigh effort level available
+            "no_sampling_params": False,      # True = temperature/top_p/top_k not allowed
         }
 
         # Apply model-specific overrides for fields not available from API
@@ -371,6 +388,10 @@ class Pipe:
             "supports_adaptive_thinking": False,
             "supports_effort_max": False,
             "supports_fast_mode": False,
+            # Opus 4.7+ specific flags (conservative defaults)
+            "requires_adaptive_only": False,
+            "supports_effort_xhigh": False,
+            "no_sampling_params": False,
         }
 
     class Valves(BaseModel):
@@ -529,9 +550,9 @@ class Pipe:
             le=64000,
             description="Thinking budget tokens",
         )
-        EFFORT: Literal["low", "medium", "high", "max"] = Field(
+        EFFORT: Literal["low", "medium", "high", "max", "xhigh"] = Field(
             default="high",
-            description="Effort level for this user. Also Controllable with OpenWebUI's reasoning_effort parameter.",
+            description="Effort level for this user. 'xhigh' is Opus 4.7+ only. Also controllable with OpenWebUI's reasoning_effort parameter.",
         )
         USE_PDF_NATIVE_UPLOAD: bool = Field(
             default=True,
@@ -1464,12 +1485,16 @@ class Pipe:
             "stream": body.get("stream", True),
             "metadata": body.get("metadata", {}),
         }
-        if body.get("temperature") is not None:
-            payload["temperature"] = float(body.get("temperature", 0))
-        if body.get("top_k") is not None:
-            payload["top_k"] = float(body.get("top_k", 0))
-        if body.get("top_p") is not None:
-            payload["top_p"] = float(body.get("top_p", 0))
+        # Sampling parameters: Opus 4.7+ returns 400 error for non-default values
+        if not model_info.get("no_sampling_params"):
+            if body.get("temperature") is not None:
+                payload["temperature"] = float(body.get("temperature", 0))
+            if body.get("top_k") is not None:
+                payload["top_k"] = float(body.get("top_k", 0))
+            if body.get("top_p") is not None:
+                payload["top_p"] = float(body.get("top_p", 0))
+        elif any(body.get(k) is not None for k in ["temperature", "top_k", "top_p"]):
+            logger.debug("Skipping sampling parameters (temperature/top_k/top_p) for Opus 4.7+")
 
         # Add data residency if set to US (1.1x token cost)
         if self.valves.DATA_RESIDENCY == "us":
@@ -1487,24 +1512,32 @@ class Pipe:
 
         if model_info["supports_effort"]:
             # Determine effective effort level
+            # Priority: body.reasoning_effort > user valve
             body_effort = body.get("reasoning_effort")
-            if body_effort in ["low", "medium", "high", "max"]:
-                # "max" is Opus 4.6 only — clamp to "high" for other models
-                if body_effort == "max" and not model_info["supports_effort_max"]:
-                    effective_effort = "high"
-                else:
-                    effective_effort = body_effort
-            elif (
-                model_info["supports_effort_max"] and __user__["valves"].EFFORT == "max"
-            ):
-                effective_effort = "max"
+            valve_effort = __user__["valves"].EFFORT
+
+            if body_effort in ["low", "medium", "high", "max", "xhigh"]:
+                requested_effort = body_effort
             else:
-                # Clamp user valve "max" to "high" for non-Opus 4.6 models
-                valve_effort = __user__["valves"].EFFORT
-                if valve_effort == "max" and not model_info["supports_effort_max"]:
-                    effective_effort = "high"
+                requested_effort = valve_effort
+
+            # Clamp effort levels based on model capabilities:
+            # - "xhigh" requires supports_effort_xhigh (Opus 4.7+)
+            # - "max" requires supports_effort_max (Opus 4.6+)
+            if requested_effort == "xhigh":
+                if model_info.get("supports_effort_xhigh"):
+                    effective_effort = "xhigh"
+                elif model_info.get("supports_effort_max"):
+                    effective_effort = "max"  # Clamp to max for Opus 4.6
                 else:
-                    effective_effort = valve_effort
+                    effective_effort = "high"  # Clamp to high for older models
+            elif requested_effort == "max":
+                if model_info.get("supports_effort_max"):
+                    effective_effort = "max"
+                else:
+                    effective_effort = "high"  # Clamp to high for older models
+            else:
+                effective_effort = requested_effort
 
             effort_config = {"effort": effective_effort}
             logger.debug(f"Effort level set to: {effective_effort}")
@@ -1514,9 +1547,16 @@ class Pipe:
             "anthropic_thinking", False
         )
         if enable_thinking and model_info["supports_thinking"]:
-            # Opus 4.6 (supports adaptive thinking) uses effort as the control
-            if model_info["supports_adaptive_thinking"]:
+            # Opus 4.7+ (requires_adaptive_only): adaptive thinking only, with display for visibility
+            # Thinking content is omitted by default in 4.7, so we set display: "summarized"
+            if model_info.get("requires_adaptive_only"):
+                payload["thinking"] = {"type": "adaptive", "display": "summarized"}
+                logger.debug("Using adaptive thinking with display: summarized (Opus 4.7+)")
+            # Opus 4.6 (supports adaptive thinking): adaptive without display override
+            elif model_info.get("supports_adaptive_thinking"):
                 payload["thinking"] = {"type": "adaptive"}
+                logger.debug("Using adaptive thinking (Opus 4.6)")
+            # Older models: use budget_tokens
             else:
                 user_budget = __user__["valves"].THINKING_BUDGET_TOKENS
                 max_tokens = min(

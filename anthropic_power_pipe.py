@@ -359,8 +359,15 @@ class Pipe:
         }
 
         # Apply model-specific overrides for fields not available from API
+        # Use prefix matching since API may return versioned IDs like claude-opus-4-7-20260415
         model_id = model.id if hasattr(model, "id") else ""
         overrides = cls.MODEL_CAPABILITY_OVERRIDES.get(model_id, {})
+        if not overrides:
+            # Try prefix match for versioned model IDs
+            for override_key, override_vals in cls.MODEL_CAPABILITY_OVERRIDES.items():
+                if model_id.startswith(override_key):
+                    overrides = override_vals
+                    break
         info.update(overrides)
 
         return info
@@ -371,11 +378,17 @@ class Pipe:
         Get model capabilities by name. Reads from API cache first,
         falls back to safe defaults for unknown models.
         """
+        # Direct cache hit
         if model_name in cls._api_capabilities_cache:
             return cls._api_capabilities_cache[model_name]
 
+        # Try prefix match in cache (for versioned model IDs)
+        for cached_name, cached_info in cls._api_capabilities_cache.items():
+            if cached_name.startswith(model_name) or model_name.startswith(cached_name):
+                return cached_info
+
         # Return conservative defaults for unknown models
-        return {
+        defaults = {
             "max_tokens": 4096,
             "context_length": 200000,
             "supports_thinking": True,
@@ -393,6 +406,14 @@ class Pipe:
             "supports_effort_xhigh": False,
             "no_sampling_params": False,
         }
+
+        # Apply model-specific overrides even for unknown models
+        for override_key, override_vals in cls.MODEL_CAPABILITY_OVERRIDES.items():
+            if model_name.startswith(override_key) or override_key.startswith(model_name):
+                defaults.update(override_vals)
+                break
+
+        return defaults
 
     class Valves(BaseModel):
         ANTHROPIC_API_KEY: str = "Your API Key Here"

@@ -509,19 +509,25 @@ class Pipe:
             "none", "clear_tool_results", "clear_thinking", "clear_both"
         ] = Field(
             default="none",
-            description="Context editing strategy: none (disabled), clear_tool_results, clear_thinking, or clear_both.",
+            description=(
+                "Context editing strategy (server-side, via Anthropic API). "
+                "'clear_tool_results': fully effective — clears old tool_use/tool_result blocks from history when the token threshold is reached, keeping only the N most recent. "
+                "'clear_thinking': partially effective — clears thinking blocks generated within the current session's tool loop only. Does NOT clear thinking from prior conversation turns, because OpenWebUI stores those as HTML text rather than structured thinking blocks, which the API cannot identify or remove. "
+                "'clear_both': combines both strategies with the same caveats. "
+                "'none': disabled."
+            ),
         )
         CONTEXT_EDITING_THINKING_KEEP: int = Field(
             default=5,
             ge=0,
             le=9999,
-            description="How many thinking blocks to keep",
+            description="Number of recent thinking blocks to preserve when clearing. Only affects thinking blocks generated within the current session's tool loop (see CONTEXT_EDITING_STRATEGY note).",
         )
         CONTEXT_EDITING_TOOL_TRIGGER: int = Field(
             default=50000,
             ge=1000,
             le=500000,
-            description="Token count threshold that triggers tool result clearing.",
+            description="Input token count threshold that triggers tool result clearing.",
         )
         CONTEXT_EDITING_TOOL_KEEP: int = Field(
             default=5,
@@ -533,11 +539,11 @@ class Pipe:
             default=10000,
             ge=0,
             le=100000,
-            description="Minimum tokens to clear when triggered (helps with cache optimization).",
+            description="Minimum tokens to clear when triggered (helps avoid fragmenting the prompt cache).",
         )
         CONTEXT_EDITING_TOOL_CLEAR_TOOL_INPUT: bool = Field(
             default=False,
-            description="Also clear tool input parameters when clearing tool results.",
+            description="Also clear tool input parameters (arguments) when clearing tool results, for additional token savings.",
         )
         DATA_RESIDENCY: Literal["global", "us"] = Field(
             default="global",

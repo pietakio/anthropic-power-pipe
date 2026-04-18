@@ -579,6 +579,10 @@ class Pipe:
             default=True,
             description="Upload PDFs as native base64 documents instead of RAG text extraction. Enables visual PDF analysis (charts, images, layouts). Only applies to 'Use Full Document' mode.",
         )
+        PRESERVE_THINKING_IN_HISTORY: bool = Field(
+            default=False,
+            description="Preserve thinking blocks as readable text in conversation history. Allows Claude to reference its prior reasoning across turns. Increases token usage significantly — enable for deep reasoning sessions only.",
+        )
         SHOW_TOKEN_COUNT: bool = Field(
             default=False,
             description="Show Context Window Progress",
@@ -1616,9 +1620,11 @@ class Pipe:
 
         raw_messages = body.get("messages", []) or []
 
+        preserve_thinking = __user__["valves"].PRESERVE_THINKING_IN_HISTORY
+
         system_messages, processed_messages, previous_marker_metadata = (
             self._convert_messages_to_claude_format(
-                raw_messages, user_has_memory_system_enabled
+                raw_messages, user_has_memory_system_enabled, preserve_thinking
             )
         )
         new_marker_metadata = ""
@@ -1938,7 +1944,8 @@ class Pipe:
         return payload, headers, new_marker_metadata, api_tool_names
 
     def _convert_messages_to_claude_format(
-        self, raw_messages, user_has_memory_system_enabled: bool = False
+        self, raw_messages, user_has_memory_system_enabled: bool = False,
+        preserve_thinking_in_history: bool = False
     ) -> tuple[list[dict], list[dict], list[str]]:
         processed_messages: list[Dict[str, Any]] = []
         extracted_memories = None
@@ -1973,8 +1980,10 @@ class Pipe:
                     # 1. Assistant message with text before + tool_use blocks
                     assistant_content = []
                     if text_before:
-                        # Clean the text (strip reasoning/code_interpreter blocks)
-                        cleaned_before = PATTERN_REASONING_DETAILS.sub("", text_before)
+                        # Clean the text (strip code_interpreter; optionally strip reasoning)
+                        cleaned_before = text_before
+                        if not preserve_thinking_in_history:
+                            cleaned_before = PATTERN_REASONING_DETAILS.sub("", cleaned_before)
                         cleaned_before = PATTERN_CODE_INTERPRETER_DETAILS.sub(
                             "", cleaned_before
                         ).strip()
@@ -2001,8 +2010,10 @@ class Pipe:
 
                     # 3. If there's text after, create another assistant message
                     if text_after:
-                        # Clean the text
-                        cleaned_after = PATTERN_REASONING_DETAILS.sub("", text_after)
+                        # Clean the text (strip code_interpreter; optionally strip reasoning)
+                        cleaned_after = text_after
+                        if not preserve_thinking_in_history:
+                            cleaned_after = PATTERN_REASONING_DETAILS.sub("", cleaned_after)
                         cleaned_after = PATTERN_CODE_INTERPRETER_DETAILS.sub(
                             "", cleaned_after
                         ).strip()
@@ -2021,7 +2032,9 @@ class Pipe:
                     continue  # Skip normal processing - we've handled this message
 
             # Normal processing for messages without tool history HTML
-            claude_message = self._convert_content_to_claude_format(raw_content, role=role)
+            claude_message = self._convert_content_to_claude_format(
+                raw_content, role=role, preserve_thinking_in_history=preserve_thinking_in_history
+            )
             if not claude_message:
                 continue
             if role == "system":
@@ -2432,7 +2445,8 @@ class Pipe:
         return tool_use_blocks, tool_result_blocks, text_before, text_after
 
     def _convert_content_to_claude_format(
-        self, content: Union[str, List[dict], None], role: str = "user"
+        self, content: Union[str, List[dict], None], role: str = "user",
+        preserve_thinking_in_history: bool = False
     ) -> List[dict]:
         """
         Process content from OpenWebUI format to Claude API format.
@@ -2452,11 +2466,10 @@ class Pipe:
                 content = PATTERN_TOOL_CALLS_STRIP.sub("", content)
                 # Strip code_interpreter blocks (display-only UI artifact)
                 content = PATTERN_CODE_INTERPRETER_DETAILS.sub("", content)
-                # Strip thinking/reasoning blocks from prior turns.
-                # We can't reconstruct them as proper API thinking blocks (missing signature),
-                # and the API auto-filters prior turn thinking anyway. Keeping them as HTML text
-                # just wastes tokens on unusable content.
-                content = PATTERN_REASONING_DETAILS.sub("", content)
+                # Optionally strip thinking/reasoning blocks. When preserve_thinking_in_history
+                # is True, the HTML remains as readable text so Claude can reference prior reasoning.
+                if not preserve_thinking_in_history:
+                    content = PATTERN_REASONING_DETAILS.sub("", content)
 
             # Only return non-empty text blocks
             if content.strip():

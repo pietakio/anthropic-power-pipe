@@ -293,6 +293,7 @@ class Pipe:
         "claude-sonnet-4-6": {
             "supports_1m_context": True,
             "supports_dynamic_filtering": True,
+            "supports_adaptive_thinking": True,
         },
         # Opus 4.7 breaking changes:
         # - No budget_tokens (adaptive thinking only)
@@ -305,6 +306,15 @@ class Pipe:
             "supports_fast_mode": True,
             "requires_adaptive_only": True,  # No budget_tokens, adaptive thinking only
             "supports_effort_xhigh": True,   # New xhigh effort level
+            "no_sampling_params": True,      # temperature/top_p/top_k return 400 error
+        },
+        # Opus 4.8: same API constraints as 4.7, fast mode now available
+        "claude-opus-4-8": {
+            "supports_1m_context": True,
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "requires_adaptive_only": True,  # No budget_tokens, adaptive thinking only
+            "supports_effort_xhigh": True,   # xhigh effort inherited from 4.7
             "no_sampling_params": True,      # temperature/top_p/top_k return 400 error
         },
     }

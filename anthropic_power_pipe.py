@@ -2459,14 +2459,27 @@ class Pipe:
                 "input": tool_input,
             })
 
-            # Create tool_result block if we have a result
+            # Create the matching tool_result block.
+            # The Anthropic API REQUIRES a tool_result for EVERY tool_use in the
+            # preceding assistant message — an orphaned tool_use triggers a hard
+            # 400 ("tool_use ids were found without tool_result blocks") that makes
+            # the whole conversation un-continuable. OWUI history doesn't always
+            # carry a result attribute (interrupted/failed tool calls, or format
+            # changes across OWUI versions), so synthesize a placeholder when the
+            # real result is missing to keep the sequence valid.
             if result_escaped is not None:
                 result_content = html.unescape(result_escaped)
-                tool_result_blocks.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_id,
-                    "content": result_content,
-                })
+            else:
+                logger.debug(
+                    f"No result found in history for tool_use {tool_id} "
+                    f"({tool_name}); inserting placeholder tool_result."
+                )
+                result_content = "[Tool result unavailable in conversation history]"
+            tool_result_blocks.append({
+                "type": "tool_result",
+                "tool_use_id": tool_id,
+                "content": result_content,
+            })
 
         return tool_use_blocks, tool_result_blocks, text_before, text_after
 

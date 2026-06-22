@@ -240,12 +240,11 @@ class PipeRequestContext:
         await self.pipe.emit_event(event, self.event_emitter)
 
     async def emit_delta(self, content: str) -> None:
-        await self.emit_event(
-            {
-                "type": "chat:completion",
-                "data": {"choices": [{"delta": {"content": content}}]},
-            }
-        )
+        # OWUI 0.9.x: stream incremental text via the native "message" delta event,
+        # not a raw "chat:completion" event. Mixing the chat:completion channel with
+        # the native event_emitter content channel causes the saved message to be
+        # wiped at finalization on 0.9.x (mirrors Podden upstream v0.9.1).
+        await self.emit_event({"type": "message", "data": {"content": content}})
         self.final_message.append(content)
 
     async def emit_replace(self, content: str) -> None:
@@ -5130,6 +5129,12 @@ class Pipe:
         if __user__["valves"].DEBUG_MODE:
             # DEBUG: content already streamed via emit_event_local; skipping duplicate
             pass
+
+        # OWUI 0.9.x: return the full final message so it is persisted as the saved
+        # assistant message. Streaming via "message" deltas alone leaves an empty
+        # saved message on 0.9.x — the return value is the authoritative content
+        # (mirrors Podden upstream v0.9.1).
+        return consolidated
 
     # =========================================================================
     # TASK MODEL (TITLE, TAGS, FOLLOW-UPS)

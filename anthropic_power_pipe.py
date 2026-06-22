@@ -747,7 +747,7 @@ class Pipe:
     # PDF & FILE HANDLING
     # =========================================================================
 
-    def _get_pdf_base64_from_file_id(self, file_id: str) -> Optional[tuple[str, str]]:
+    async def _get_pdf_base64_from_file_id(self, file_id: str) -> Optional[tuple[str, str]]:
         """
         Read a PDF file from storage and return base64 encoded data.
 
@@ -762,7 +762,7 @@ class Pipe:
             return None
 
         try:
-            file = Files.get_file_by_id(file_id)
+            file = await Files.get_file_by_id(file_id)
             if not file:
                 logger.warning(f"File not found: {file_id}")
                 return None
@@ -807,7 +807,7 @@ class Pipe:
             logger.error(f"Error reading PDF file {file_id}: {e}")
             return None
 
-    def _get_full_context_pdfs(
+    async def _get_full_context_pdfs(
         self,
         __files__: Optional[List[Dict[str, Any]]],
         previous_marker_metadata: List[str],
@@ -848,7 +848,7 @@ class Pipe:
                 continue
 
             # Get base64 encoded PDF
-            result = self._get_pdf_base64_from_file_id(file_id)
+            result = await self._get_pdf_base64_from_file_id(file_id)
             if result:
                 encoded_data, filename = result
                 pdf_documents.append(
@@ -1178,7 +1178,7 @@ class Pipe:
 
             # Create OpenWebUI file record
             file_hash = hashlib.sha256(content).hexdigest()
-            Files.insert_new_file(
+            await Files.insert_new_file(
                 user_id=user_id,
                 form_data=type("FileForm", (), {
                     "model_dump": lambda self_: {
@@ -1264,7 +1264,7 @@ class Pipe:
             content_type = file.get("content_type", "")
             if not content_type:
                 # Fallback: check OpenWebUI file meta for content_type
-                file_record_check = Files.get_file_by_id(file_id_owui)
+                file_record_check = await Files.get_file_by_id(file_id_owui)
                 if file_record_check and file_record_check.meta:
                     content_type = file_record_check.meta.get("content_type", "")
             if content_type and content_type.startswith("image/"):
@@ -1272,7 +1272,7 @@ class Pipe:
                 continue
 
             # Look up OpenWebUI file record for cached anthropic_file_id
-            file_record = Files.get_file_by_id(file_id_owui)
+            file_record = await Files.get_file_by_id(file_id_owui)
             if not file_record:
                 logger.warning(f"File not found in DB: {file_id_owui}")
                 continue
@@ -1312,7 +1312,7 @@ class Pipe:
                     msg_num = current_user_msg_num
 
                     # Cache in OpenWebUI file metadata
-                    Files.update_file_metadata_by_id(file_id_owui, {
+                    await Files.update_file_metadata_by_id(file_id_owui, {
                         "anthropic_file_id": anthropic_file_id,
                         "anthropic_file_msg_idx": msg_num,
                     })
@@ -1696,7 +1696,7 @@ class Pipe:
             elif __user__["valves"].USE_PDF_NATIVE_UPLOAD:
                 # Native PDF upload (base64 document blocks) — only PDFs
                 pdf_documents_content_blocks, new_marker_metadata = (
-                    self._get_full_context_pdfs(__files__, previous_marker_metadata)
+                    await self._get_full_context_pdfs(__files__, previous_marker_metadata)
                 )
                 if pdf_documents_content_blocks:
                     processed_messages[0]["content"] = (
@@ -3031,7 +3031,7 @@ class Pipe:
                     try:
                         openwebui_model_id = __metadata__.get("model_id") or body.get("model", "")
                         if openwebui_model_id and MODELS_AVAILABLE:
-                            owui_model = Models.get_model_by_id(openwebui_model_id)
+                            owui_model = await Models.get_model_by_id(openwebui_model_id)
                             if owui_model:
                                 # ModelModel has .meta (ModelMeta pydantic model), not .info
                                 meta = owui_model.meta
@@ -3047,21 +3047,21 @@ class Pipe:
                                     user_id = __user__.get("id", "") if __user__ else ""
                                     accessible = {
                                         s.id
-                                        for s in SkillsModel.get_skills_by_user_id(user_id, "read")
+                                        for s in await SkillsModel.get_skills_by_user_id(user_id, "read")
                                     }
                                     logger.debug(f"Accessible skills for user: {accessible}")
                                     skill_ids = [
                                         sid
                                         for sid in model_skill_ids
                                         if sid in accessible
-                                        and (s := SkillsModel.get_skill_by_id(sid))
+                                        and (s := await SkillsModel.get_skill_by_id(sid))
                                         and s.is_active
                                     ]
                                     logger.debug(f"Resolved skill_ids: {skill_ids}")
                     except Exception as e:
                         logger.debug(f"Could not resolve skill IDs: {e}")
 
-                    builtin_tools = get_builtin_tools(
+                    builtin_tools = await get_builtin_tools(
                         __request__,
                         {
                             "__user__": __user__,
@@ -3109,7 +3109,7 @@ class Pipe:
                         openwebui_model_id = body["model"]
 
                     if openwebui_model_id:
-                        model = Models.get_model_by_id(openwebui_model_id)
+                        model = await Models.get_model_by_id(openwebui_model_id)
                         if model:
                             params = dict(model.params or {})
                             if params.get("function_calling") != "native":
@@ -3131,7 +3131,7 @@ class Pipe:
                                 params["function_calling"] = "native"
                                 form_data = model.model_dump()
                                 form_data["params"] = params
-                                Models.update_model_by_id(
+                                await Models.update_model_by_id(
                                     openwebui_model_id, ModelForm(**form_data)
                                 )
                 except Exception as e:
@@ -4499,7 +4499,7 @@ class Pipe:
                                                 if PROCESS_TOOL_RESULT_AVAILABLE and __request__:
                                                     try:
                                                         tool_result, tool_result_files, tool_result_embeds = (
-                                                            process_tool_result(
+                                                            await process_tool_result(
                                                                 __request__,
                                                                 tool_name,
                                                                 tool_result,

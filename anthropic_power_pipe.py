@@ -599,6 +599,10 @@ class Pipe:
             default=False,
             description="Preserve thinking blocks as readable text in conversation history. Allows Claude to reference its prior reasoning across turns. Increases token usage significantly — enable for deep reasoning sessions only.",
         )
+        DISPLAY_THINKING: bool = Field(
+            default=True,
+            description="Show summarized thinking blocks in the response (adaptive-thinking models, e.g. Opus 4.7+). When on (default), thinking summaries are returned and displayed. Turn OFF to suppress them: the model still thinks (charged as output), but the summary is not returned, so it is never written to the prompt cache during tool loops — avoids large 1-hour cache writes on long-thinking work like physics.",
+        )
         SHOW_TOKEN_COUNT: bool = Field(
             default=False,
             description="Show Context Window Progress",
@@ -1587,12 +1591,19 @@ class Pipe:
         enable_thinking = __user__["valves"].ENABLE_THINKING or __metadata__.get(
             "anthropic_thinking", False
         )
+        display_thinking = __user__["valves"].DISPLAY_THINKING
         if enable_thinking and model_info["supports_thinking"]:
             # Opus 4.7+ (requires_adaptive_only): adaptive thinking only, with display for visibility
             # Thinking content is omitted by default in 4.7, so we set display: "summarized"
+            # unless DISPLAY_THINKING is off — then we omit display so the summary is never
+            # returned (and therefore never written to the prompt cache during tool loops).
             if model_info.get("requires_adaptive_only"):
-                payload["thinking"] = {"type": "adaptive", "display": "summarized"}
-                logger.debug("Using adaptive thinking with display: summarized (Opus 4.7+)")
+                if display_thinking:
+                    payload["thinking"] = {"type": "adaptive", "display": "summarized"}
+                    logger.debug("Using adaptive thinking with display: summarized (Opus 4.7+)")
+                else:
+                    payload["thinking"] = {"type": "adaptive"}
+                    logger.debug("Using adaptive thinking, display suppressed (DISPLAY_THINKING off)")
             # Opus 4.6 (supports adaptive thinking): adaptive without display override
             elif model_info.get("supports_adaptive_thinking"):
                 payload["thinking"] = {"type": "adaptive"}
